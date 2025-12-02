@@ -47,3 +47,7 @@ examples/wandb/
 *.spec
 
 qwen3-llama-results/
+qwen3-e8-results/
+qwen3-e6-results/
+qwen3-e8.sh
+qwen3-e6.sh
