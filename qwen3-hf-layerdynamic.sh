@@ -5,7 +5,7 @@
 #     --batch_size auto
 
 accelerate launch\
-    -m lm_eval --model hf_qwen3_scale \
+    -m lm_eval --model hf_qwen3_layerdynamic \
     --model_args pretrained=../Qwen/Qwen3-30B-A3B-Instruct-2507-E4,load_in_4bit=True \
     --tasks hellaswag \
     --batch_size auto
