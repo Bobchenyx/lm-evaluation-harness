@@ -232,10 +232,10 @@ class Qwen3MoeMLP(nn.Module):
 
 
 class Qwen3MoeSparseMoeBlock(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, top_k=None):
         super().__init__()
         self.num_experts = config.num_experts
-        self.top_k = config.num_experts_per_tok
+        self.top_k = top_k if top_k is not None else config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
 
         # gating
@@ -316,7 +316,16 @@ class Qwen3MoeDecoderLayer(GradientCheckpointingLayer):
         if (layer_idx not in config.mlp_only_layers) and (
             config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
         ):
-            self.mlp = Qwen3MoeSparseMoeBlock(config)
+            # Compute dynamic expert count: use more experts in first/last 1/8 of layers
+            num_layers = config.num_hidden_layers
+            use_more_experts = layer_idx < num_layers // 8 or layer_idx >= 7 * num_layers // 8
+            if use_more_experts:
+                top_k = config.num_experts_per_tok
+            else:
+                top_k = max(4, int(0.75 * config.num_experts_per_tok))
+            
+            print(f"Layer {layer_idx}: using {top_k} experts")
+            self.mlp = Qwen3MoeSparseMoeBlock(config, top_k=top_k)
         else:
             self.mlp = Qwen3MoeMLP(config, intermediate_size=config.intermediate_size)
 
