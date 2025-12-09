@@ -6,6 +6,7 @@ from . import (
     hf_audiolm,
     hf_qwen3_layerdynamic,
     hf_qwen3_scale,
+    hf_qwen3_token,
     hf_qwen3,
     hf_steered,
     hf_vlms,
