@@ -240,8 +240,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         
         # Dynamic expert selection params
         self.enable_dynamic_topk = True  
-        self.full_expert_ratio = 0.3  
         self.reduced_top_k = 4  
+        self.dynamic_topk_threshold = 0.65
 
         # gating
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
@@ -263,63 +263,36 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         routing_weights_full = F.softmax(router_logits, dim=1, dtype=torch.float)
 
         if self.enable_dynamic_topk:
-            # confidence per token
-            top1_weights, _ = routing_weights_full.max(dim=1)
-            
-            # number of tokens to use full number of experts
-            num_full_expert_tokens = int(num_tokens * self.full_expert_ratio)
-            
-            # sort tokens by confidence
-            _, sorted_indices = torch.sort(top1_weights, descending=False)
-            
-            # mask for tokens to use different number of experts
-            mask_full_experts = torch.zeros(num_tokens, dtype=torch.bool, device=hidden_states.device)
-            mask_full_experts[sorted_indices[:num_full_expert_tokens]] = True
-            mask_reduced_experts = ~mask_full_experts
-            
+            top4_sum = routing_weights_full.topk(self.reduced_top_k, dim=-1).values.sum(dim=-1)
+            top8_sum = routing_weights_full.topk(self.top_k, dim=-1).values.sum(dim=-1)
+            ratio_4_over_8 = top4_sum / (top8_sum + 1e-9)
+
+            use4_mask = ratio_4_over_8 >= self.dynamic_topk_threshold
+            use8_mask = ~use4_mask
+
             # use num_experts as invalid ID to avoid 0 being treated as expert 0
             selected_experts = torch.full(
                 (num_tokens, self.top_k), self.num_experts, dtype=torch.long, device=hidden_states.device
             )
             routing_weights = torch.zeros(num_tokens, self.top_k, dtype=torch.float, device=hidden_states.device)
-            
-            actual_top_k = torch.full((num_tokens,), self.top_k, dtype=torch.long, device=hidden_states.device)
-            
-            # use full number of experts for low confidence tokens
-            if mask_full_experts.any():
-                rw_full, se_full = torch.topk(
-                    routing_weights_full[mask_full_experts],
-                    k=self.top_k,
-                    dim=-1
-                )
-                
-                selected_experts[mask_full_experts, :self.top_k] = se_full
-                routing_weights[mask_full_experts, :self.top_k] = rw_full
-                
-            # use reduced number of experts for high confidence tokens
-            if mask_reduced_experts.any():
-                rw_reduced, se_reduced = torch.topk(
-                    routing_weights_full[mask_reduced_experts],
-                    k=self.reduced_top_k,
-                    dim=-1
-                )
-                
-                selected_experts[mask_reduced_experts, :self.reduced_top_k] = se_reduced
-                routing_weights[mask_reduced_experts, :self.reduced_top_k] = rw_reduced
-                
-                # update the actual number of experts used for each token
-                actual_top_k[mask_reduced_experts] = self.reduced_top_k
-            
+
+            if use4_mask.any():
+                rw4, se4 = torch.topk(routing_weights_full[use4_mask], k=self.reduced_top_k, dim=-1)
+                selected_experts[use4_mask, : self.reduced_top_k] = se4
+                routing_weights[use4_mask, : self.reduced_top_k] = rw4
+
+            if use8_mask.any():
+                rw8, se8 = torch.topk(routing_weights_full[use8_mask], k=self.top_k, dim=-1)
+                selected_experts[use8_mask, : self.top_k] = se8
+                routing_weights[use8_mask, : self.top_k] = rw8
+
             if self.norm_topk_prob:
-                # normalize weights for full experts
-                if mask_full_experts.any():
-                    sum_full = routing_weights[mask_full_experts, :self.top_k].sum(dim=-1, keepdim=True)
-                    routing_weights[mask_full_experts, :self.top_k] /= sum_full
-                
-                # normalize weights for reduced experts
-                if mask_reduced_experts.any():
-                    sum_reduced = routing_weights[mask_reduced_experts, :self.reduced_top_k].sum(dim=-1, keepdim=True)
-                    routing_weights[mask_reduced_experts, :self.reduced_top_k] /= sum_reduced
+                if use4_mask.any():
+                    sum4 = routing_weights[use4_mask, : self.reduced_top_k].sum(dim=-1, keepdim=True)
+                    routing_weights[use4_mask, : self.reduced_top_k] /= sum4
+                if use8_mask.any():
+                    sum8 = routing_weights[use8_mask, : self.top_k].sum(dim=-1, keepdim=True)
+                    routing_weights[use8_mask, : self.top_k] /= sum8
         else:
             # topk for all tokens and normalize weights
             routing_weights, selected_experts = torch.topk(routing_weights_full, self.top_k, dim=-1)
